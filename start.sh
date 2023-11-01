@@ -1,0 +1,1 @@
+nohup python pilot/server/dbgpt_server.py  --port 38000 --host 127.0.0.1  > nohup.out 2>&1 &
