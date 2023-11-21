@@ -16,6 +16,8 @@ from pilot.utils.executor_utils import ExecutorFactory, blocking_func_to_async
 from pilot.utils.tracer import root_tracer, trace
 from pydantic import Extra
 from pilot.memory.chat_history.chat_hisotry_factory import ChatHistory
+from pilot.awel import BaseOperator, SimpleCallDataInputSource, InputOperator, DAG
+from pilot.model.operator.model_operator import ModelOperator, ModelStreamOperator
 
 logger = logging.getLogger(__name__)
 headers = {"User-Agent": "dbgpt Client"}
@@ -56,6 +58,7 @@ class BaseChat(ABC):
             chat_param["model_name"] if chat_param["model_name"] else CFG.LLM_MODEL
         )
         self.llm_echo = False
+        self.model_cache_enable = chat_param.get("model_cache_enable", False)
 
         ### load prompt template
         # self.prompt_template: PromptTemplate = CFG.prompt_templates[
@@ -88,6 +91,11 @@ class BaseChat(ABC):
             ComponentType.EXECUTOR_DEFAULT, ExecutorFactory
         ).create()
 
+        self._model_operator: BaseOperator = _build_model_operator()
+        self._model_stream_operator: BaseOperator = _build_model_operator(
+            is_stream=True, dag_name="llm_stream_model_dag"
+        )
+
     class Config:
         """Configuration for this pydantic object."""
 
@@ -110,6 +118,9 @@ class BaseChat(ABC):
 
     def do_action(self, prompt_response):
         return prompt_response
+
+    def message_adjust(self):
+        pass
 
     def get_llm_speak(self, prompt_define_response):
         if hasattr(prompt_define_response, "thoughts"):
@@ -166,7 +177,7 @@ class BaseChat(ABC):
             "messages": llm_messages,
             "temperature": float(self.prompt_template.temperature),
             "max_new_tokens": int(self.prompt_template.max_new_tokens),
-            "stop": self.prompt_template.sep,
+            # "stop": self.prompt_template.sep,
             "echo": self.llm_echo,
         }
         return payload
@@ -174,7 +185,7 @@ class BaseChat(ABC):
     def stream_plugin_call(self, text):
         return text
 
-    def knowledge_reference_call(self, text):
+    def stream_call_reinforce_fn(self, text):
         return text
 
     async def check_iterator_end(iterator):
@@ -203,13 +214,11 @@ class BaseChat(ABC):
             "BaseChat.stream_call", metadata=self._get_span_metadata(payload)
         )
         payload["span_id"] = span.span_id
+        payload["model_cache_enable"] = self.model_cache_enable
         try:
-            from pilot.model.cluster import WorkerManagerFactory
-
-            worker_manager = CFG.SYSTEM_APP.get_component(
-                ComponentType.WORKER_MANAGER_FACTORY, WorkerManagerFactory
-            ).create()
-            async for output in worker_manager.generate_stream(payload):
+            async for output in await self._model_stream_operator.call_stream(
+                call_data={"data": payload}
+            ):
                 ### Plug-in research in result generation
                 msg = self.prompt_template.output_parser.parse_model_stream_resp_ex(
                     output, self.skip_echo_len
@@ -218,7 +227,7 @@ class BaseChat(ABC):
                 view_msg = view_msg.replace("\n", "\\n")
                 yield view_msg
             self.current_message.add_ai_message(msg)
-            view_msg = self.knowledge_reference_call(msg)
+            view_msg = self.stream_call_reinforce_fn(view_msg)
             self.current_message.add_view_message(view_msg)
             span.end()
         except Exception as e:
@@ -239,15 +248,12 @@ class BaseChat(ABC):
             "BaseChat.nostream_call", metadata=self._get_span_metadata(payload)
         )
         payload["span_id"] = span.span_id
+        payload["model_cache_enable"] = self.model_cache_enable
         try:
-            from pilot.model.cluster import WorkerManagerFactory
-
-            worker_manager = CFG.SYSTEM_APP.get_component(
-                ComponentType.WORKER_MANAGER_FACTORY, WorkerManagerFactory
-            ).create()
-
             with root_tracer.start_span("BaseChat.invoke_worker_manager.generate"):
-                model_output = await worker_manager.generate(payload)
+                model_output = await self._model_operator.call(
+                    call_data={"data": payload}
+                )
 
             ### output parse
             ai_response_text = (
@@ -286,10 +292,13 @@ class BaseChat(ABC):
                 self.prompt_template.output_parser.parse_view_response,
                 speak_to_user,
                 result,
+                prompt_define_response,
             )
 
             view_message = view_message.replace("\n", "\\n")
             self.current_message.add_view_message(view_message)
+            self.message_adjust()
+
             span.end()
         except Exception as e:
             print(traceback.format_exc())
@@ -306,15 +315,9 @@ class BaseChat(ABC):
         payload = await self.__call_base()
         logger.info(f"Request: \n{payload}")
         ai_response_text = ""
+        payload["model_cache_enable"] = self.model_cache_enable
         try:
-            from pilot.model.cluster import WorkerManagerFactory
-
-            worker_manager = CFG.SYSTEM_APP.get_component(
-                ComponentType.WORKER_MANAGER_FACTORY, WorkerManagerFactory
-            ).create()
-
-            model_output = await worker_manager.generate(payload)
-
+            model_output = await self._model_operator.call(call_data={"data": payload})
             ### output parse
             ai_response_text = (
                 self.prompt_template.output_parser.parse_model_nostream_resp(
@@ -568,3 +571,88 @@ class BaseChat(ABC):
                 )
         else:
             return prompt_define_response
+
+
+def _build_model_operator(
+    is_stream: bool = False, dag_name: str = "llm_model_dag"
+) -> BaseOperator:
+    """Builds and returns a model processing workflow (DAG) operator.
+
+    This function constructs a Directed Acyclic Graph (DAG) for processing data using a model.
+    It includes caching and branching logic to either fetch results from a cache or process
+    data using the model. It supports both streaming and non-streaming modes.
+
+    .. code-block:: python
+        input_node >> cache_check_branch_node
+        cache_check_branch_node >> model_node >> save_cached_node >> join_node
+        cache_check_branch_node >> cached_node >> join_node
+
+    equivalent to::
+
+                          -> model_node -> save_cached_node ->
+                         /                                    \
+        input_node -> cache_check_branch_node                   ---> join_node
+                        \                                     /
+                         -> cached_node ------------------- ->
+
+    Args:
+        is_stream (bool): Flag to determine if the operator should process data in streaming mode.
+        dag_name (str): Name of the DAG.
+
+    Returns:
+        BaseOperator: The final operator in the constructed DAG, typically a join node.
+    """
+    from pilot.model.cluster import WorkerManagerFactory
+    from pilot.awel import JoinOperator
+    from pilot.model.operator.model_operator import (
+        ModelCacheBranchOperator,
+        CachedModelStreamOperator,
+        CachedModelOperator,
+        ModelSaveCacheOperator,
+        ModelStreamSaveCacheOperator,
+    )
+    from pilot.cache import CacheManager
+
+    # Fetch worker and cache managers from the system configuration
+    worker_manager = CFG.SYSTEM_APP.get_component(
+        ComponentType.WORKER_MANAGER_FACTORY, WorkerManagerFactory
+    ).create()
+    cache_manager: CacheManager = CFG.SYSTEM_APP.get_component(
+        ComponentType.MODEL_CACHE_MANAGER, CacheManager
+    )
+    # Define task names for the model and cache nodes
+    model_task_name = "llm_model_node"
+    cache_task_name = "llm_model_cache_node"
+
+    with DAG(dag_name):
+        # Create an input node
+        input_node = InputOperator(SimpleCallDataInputSource())
+        # Determine if the workflow should operate in streaming mode
+        if is_stream:
+            model_node = ModelStreamOperator(worker_manager, task_name=model_task_name)
+            cached_node = CachedModelStreamOperator(
+                cache_manager, task_name=cache_task_name
+            )
+            save_cached_node = ModelStreamSaveCacheOperator(cache_manager)
+        else:
+            model_node = ModelOperator(worker_manager, task_name=model_task_name)
+            cached_node = CachedModelOperator(cache_manager, task_name=cache_task_name)
+            save_cached_node = ModelSaveCacheOperator(cache_manager)
+
+        # Create a branch node to decide between fetching from cache or processing with the model
+        cache_check_branch_node = ModelCacheBranchOperator(
+            cache_manager,
+            model_task_name="llm_model_node",
+            cache_task_name="llm_model_cache_node",
+        )
+        # Create a join node to merge outputs from the model and cache nodes, just keep the first not empty output
+        join_node = JoinOperator(
+            combine_function=lambda model_out, cache_out: cache_out or model_out
+        )
+
+        # Define the workflow structure using the >> operator
+        input_node >> cache_check_branch_node
+        cache_check_branch_node >> model_node >> save_cached_node >> join_node
+        cache_check_branch_node >> cached_node >> join_node
+
+    return join_node
