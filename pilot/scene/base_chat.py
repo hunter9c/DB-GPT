@@ -78,7 +78,9 @@ class BaseChat(ABC):
 
         self.history_message: List[OnceConversation] = self.memory.messages()
         self.current_message: OnceConversation = OnceConversation(
-            self.chat_mode.value()
+            self.chat_mode.value(),
+            user_name=chat_param.get("user_name"),
+            sys_code=chat_param.get("sys_code"),
         )
         self.current_message.model_name = self.llm_model
         if chat_param["select_param"]:
@@ -171,7 +173,6 @@ class BaseChat(ABC):
             "messages": llm_messages,
             "temperature": float(self.prompt_template.temperature),
             "max_new_tokens": int(self.prompt_template.max_new_tokens),
-            # "stop": self.prompt_template.sep,
             "echo": self.llm_echo,
         }
         return payload
@@ -202,7 +203,7 @@ class BaseChat(ABC):
         payload = await self.__call_base()
 
         self.skip_echo_len = len(payload.get("prompt").replace("</s>", " ")) + 11
-        logger.info(f"Requert: \n{payload}")
+        logger.info(f"payload request: \n{payload}")
         ai_response_text = ""
         span = root_tracer.start_span(
             "BaseChat.stream_call", metadata=self._get_span_metadata(payload)
@@ -213,7 +214,7 @@ class BaseChat(ABC):
             async for output in await self._model_stream_operator.call_stream(
                 call_data={"data": payload}
             ):
-                ### Plug-in research in result generation
+                # Plugin research in result generation
                 msg = self.prompt_template.output_parser.parse_model_stream_resp_ex(
                     output, self.skip_echo_len
                 )
@@ -226,7 +227,7 @@ class BaseChat(ABC):
             span.end()
         except Exception as e:
             print(traceback.format_exc())
-            logger.error("model response parase failed！" + str(e))
+            logger.error("model response parse failed！" + str(e))
             self.current_message.add_view_message(
                 f"""<span style=\"color:red\">ERROR!</span>{str(e)}\n  {ai_response_text} """
             )

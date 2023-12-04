@@ -66,7 +66,7 @@ class Config(metaclass=Singleton):
 
         # wenxin
         self.wenxin_proxy_api_key = os.getenv("WEN_XIN_API_KEY")
-        self.wenxin_proxy_api_secret = os.getenv("WEN_XIN_SECRET_KEY")
+        self.wenxin_proxy_api_secret = os.getenv("WEN_XIN_API_SECRET")
         self.wenxin_model_version = os.getenv("WEN_XIN_MODEL_VERSION")
         if self.wenxin_proxy_api_key and self.wenxin_proxy_api_secret:
             os.environ["wenxin_proxyllm_proxy_api_key"] = self.wenxin_proxy_api_key
@@ -84,7 +84,7 @@ class Config(metaclass=Singleton):
             os.environ["spark_proxyllm_proxy_api_key"] = self.spark_proxy_api_key
             os.environ["spark_proxyllm_proxy_api_secret"] = self.spark_proxy_api_secret
             os.environ["spark_proxyllm_proxyllm_backend"] = self.spark_api_version
-            os.environ["spark_proxyllm_proxy_app_id"] = self.spark_proxy_api_appid
+            os.environ["spark_proxyllm_proxy_api_app_id"] = self.spark_proxy_api_appid
 
         # baichuan proxy
         self.bc_proxy_api_key = os.getenv("BAICHUAN_PROXY_API_KEY")
@@ -103,13 +103,6 @@ class Config(metaclass=Singleton):
 
         self.use_mac_os_tts = False
         self.use_mac_os_tts = os.getenv("USE_MAC_OS_TTS")
-
-        # milvus or zilliz cloud configuration
-        self.milvus_addr = os.getenv("MILVUS_ADDR", "localhost:19530")
-        self.milvus_username = os.getenv("MILVUS_USERNAME")
-        self.milvus_password = os.getenv("MILVUS_PASSWORD")
-        self.milvus_collection = os.getenv("MILVUS_COLLECTION", "dbgpt")
-        self.milvus_secure = os.getenv("MILVUS_SECURE", "False").lower() == "true"
 
         self.authorise_key = os.getenv("AUTHORISE_COMMAND_KEY", "y")
         self.exit_key = os.getenv("EXIT_KEY", "n")
@@ -190,7 +183,7 @@ class Config(metaclass=Singleton):
         self.LOCAL_DB_PASSWORD = os.getenv("LOCAL_DB_PASSWORD", "aa123456")
         self.LOCAL_DB_POOL_SIZE = int(os.getenv("LOCAL_DB_POOL_SIZE", 10))
 
-        self.CHAT_HISTORY_STORE_TYPE = os.getenv("CHAT_HISTORY_STORE_TYPE", "duckdb")
+        self.CHAT_HISTORY_STORE_TYPE = os.getenv("CHAT_HISTORY_STORE_TYPE", "db")
 
         ### LLM Model Service Configuration
         self.LLM_MODEL = os.getenv("LLM_MODEL", "vicuna-13b-v1.5")
@@ -232,10 +225,18 @@ class Config(metaclass=Singleton):
         self.KNOWLEDGE_CHUNK_SIZE = int(os.getenv("KNOWLEDGE_CHUNK_SIZE", 100))
         self.KNOWLEDGE_CHUNK_OVERLAP = int(os.getenv("KNOWLEDGE_CHUNK_OVERLAP", 50))
         self.KNOWLEDGE_SEARCH_TOP_SIZE = int(os.getenv("KNOWLEDGE_SEARCH_TOP_SIZE", 5))
+        # default recall similarity score, between 0 and 1
+        self.KNOWLEDGE_SEARCH_RECALL_SCORE = float(
+            os.getenv("KNOWLEDGE_SEARCH_RECALL_SCORE", 0.3)
+        )
         self.KNOWLEDGE_SEARCH_MAX_TOKEN = int(
             os.getenv("KNOWLEDGE_SEARCH_MAX_TOKEN", 2000)
         )
-        ### Control whether to display the source document of knowledge on the front end.
+        # Whether to enable Chat Knowledge Search Rewrite Mode
+        self.KNOWLEDGE_SEARCH_REWRITE = (
+            os.getenv("KNOWLEDGE_SEARCH_REWRITE", "False").lower() == "true"
+        )
+        # Control whether to display the source document of knowledge on the front end.
         self.KNOWLEDGE_CHAT_SHOW_RELATIONS = (
             os.getenv("KNOWLEDGE_CHAT_SHOW_RELATIONS", "False").lower() == "true"
         )
