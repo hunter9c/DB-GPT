@@ -292,7 +292,7 @@ def torch_requires(
             )
             torchvision_url = _build_wheels(
                 "torchvision",
-                torch_version,
+                torchvision_version,
                 base_url_func=lambda v, x, y: f"https://download.pytorch.org/whl/{x}",
                 supported_cuda_versions=supported_versions,
             )
@@ -375,7 +375,8 @@ def core_requires():
         "auto-gpt-plugin-template",
         "gTTS==2.3.1",
         "langchain>=0.0.286",
-        "SQLAlchemy==2.0.22",
+        # change from fixed version 2.0.22 to variable version, because other dependencies are >=1.4, such as pydoris is <2
+        "SQLAlchemy>=1.4,<3",
         "fastapi==0.98.0",
         "pymysql",
         "duckdb==0.8.1",
@@ -526,7 +527,14 @@ def all_datasource_requires():
     pip install "db-gpt[datasource]"
     """
 
-    setup_spec.extras["datasource"] = ["pymssql", "pymysql", "pyspark", "psycopg2"]
+    setup_spec.extras["datasource"] = [
+        "pymssql",
+        "pymysql",
+        "pyspark",
+        "psycopg2",
+        # for doris
+        "pydoris>=1.0.2,<2.0.0",
+    ]
 
 
 def openai_requires():
@@ -619,7 +627,7 @@ init_install_requires()
 setuptools.setup(
     name="db-gpt",
     packages=find_packages(exclude=("tests", "*.tests", "*.tests.*", "examples")),
-    version="0.4.2",
+    version="0.4.4",
     author="csunny",
     author_email="cfqcsunny@gmail.com",
     description="DB-GPT is an experimental open-source project that uses localized GPT large models to interact with your data and environment."
@@ -633,7 +641,7 @@ setuptools.setup(
     extras_require=setup_spec.extras,
     entry_points={
         "console_scripts": [
-            "dbgpt=pilot.scripts.cli_scripts:main",
+            "dbgpt=dbgpt.cli.cli_scripts:main",
         ],
     },
 )
