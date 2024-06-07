@@ -1,13 +1,20 @@
+"""The output parser is used to parse the output of an LLM call.
+
+TODO: Make this more general and clear.
+"""
+
 from __future__ import annotations
 
 import json
-from abc import ABC
 import logging
+from abc import ABC
 from dataclasses import asdict
-from typing import Any, Dict, TypeVar, Union
+from typing import Any, TypeVar, Union
 
-from dbgpt.core.awel import MapOperator
 from dbgpt.core import ModelOutput
+from dbgpt.core.awel import MapOperator
+from dbgpt.core.awel.flow import IOField, OperatorCategory, OperatorType, ViewMetadata
+from dbgpt.util.i18n_utils import _
 
 T = TypeVar("T")
 ResponseTye = Union[str, bytes, ModelOutput]
@@ -21,12 +28,44 @@ class BaseOutputParser(MapOperator[ModelOutput, Any], ABC):
     Output parsers help structure language model responses.
     """
 
+    metadata = ViewMetadata(
+        label=_("Base Output Operator"),
+        name="base_output_operator",
+        operator_type=OperatorType.TRANSFORM_STREAM,
+        category=OperatorCategory.OUTPUT_PARSER,
+        description=_("The base LLM out parse."),
+        parameters=[],
+        inputs=[
+            IOField.build_from(
+                _("Model Output"),
+                "model_output",
+                ModelOutput,
+                is_list=True,
+                description=_("The model output of upstream."),
+            )
+        ],
+        outputs=[
+            IOField.build_from(
+                _("Model Output"),
+                "model_output",
+                str,
+                is_list=True,
+                description=_("The model output after parsing."),
+            )
+        ],
+    )
+
     def __init__(self, is_stream_out: bool = True, **kwargs):
+        """Create a new output parser."""
         super().__init__(**kwargs)
         self.is_stream_out = is_stream_out
         self.data_schema = None
 
     def update(self, data_schema):
+        """Update the data schema.
+
+        TODO: Remove this method.
+        """
         self.data_schema = data_schema
 
     def __post_process_code(self, code):
@@ -40,11 +79,18 @@ class BaseOutputParser(MapOperator[ModelOutput, Any], ABC):
         return code
 
     def parse_model_stream_resp_ex(self, chunk: ResponseTye, skip_echo_len):
-        data = _parse_model_response(chunk)
-        """ TODO Multi mode output handler,  rewrite this for multi model, use adapter mode.
+        """Parse the output of an LLM call.
+
+        Args:
+            chunk (ResponseTye): The output of an LLM call.
+            skip_echo_len (int): The length of the prompt to skip.
         """
+        data = _parse_model_response(chunk)
+        # TODO: Multi mode output handler, rewrite this for multi model, use adapter
+        #  mode.
+
         model_context = data.get("model_context")
-        has_echo = True
+        has_echo = False
         if model_context and "prompt_echo_len_char" in model_context:
             prompt_echo_len_char = int(model_context.get("prompt_echo_len_char", -1))
             has_echo = bool(model_context.get("echo", False))
@@ -65,6 +111,7 @@ class BaseOutputParser(MapOperator[ModelOutput, Any], ABC):
             return output
 
     def parse_model_nostream_resp(self, response: ResponseTye, sep: str):
+        """Parse the output of an LLM call."""
         resp_obj_ex = _parse_model_response(response)
         if isinstance(resp_obj_ex, str):
             resp_obj_ex = json.loads(resp_obj_ex)
@@ -80,19 +127,20 @@ class BaseOutputParser(MapOperator[ModelOutput, Any], ABC):
             ai_response = ai_response.replace("assistant:", "")
             ai_response = ai_response.replace("Assistant:", "")
             ai_response = ai_response.replace("ASSISTANT:", "")
-            ai_response = ai_response.replace("\_", "_")
-            ai_response = ai_response.replace("\*", "*")
+            ai_response = ai_response.replace("\\_", "_")
+            ai_response = ai_response.replace("\\*", "*")
             ai_response = ai_response.replace("\t", "")
 
-            ai_response = ai_response.strip().replace("\\n", " ").replace("\n", " ")
+            # ai_response = ai_response.strip().replace("\\n", " ").replace("\n", " ")
             print("un_stream ai response:", ai_response)
             return ai_response
         else:
             raise ValueError(
-                f"""Model server error!code={resp_obj_ex["error_code"]}, errmsg is {resp_obj_ex["text"]}"""
+                f"Model server error!code={resp_obj_ex['error_code']}, error msg is "
+                f"{resp_obj_ex['text']}"
             )
 
-    def __illegal_json_ends(self, s):
+    def _illegal_json_ends(self, s):
         temp_json = s
         illegal_json_ends_1 = [", }", ",}"]
         illegal_json_ends_2 = ", ]", ",]"
@@ -102,25 +150,25 @@ class BaseOutputParser(MapOperator[ModelOutput, Any], ABC):
             temp_json = temp_json.replace(illegal_json_end, " ]")
         return temp_json
 
-    def __extract_json(self, s):
+    def _extract_json(self, s):
         try:
             # Get the dual-mode analysis first and get the maximum result
-            temp_json_simple = self.__json_interception(s)
-            temp_json_array = self.__json_interception(s, True)
+            temp_json_simple = self._json_interception(s)
+            temp_json_array = self._json_interception(s, True)
             if len(temp_json_simple) > len(temp_json_array):
                 temp_json = temp_json_simple
             else:
                 temp_json = temp_json_array
 
             if not temp_json:
-                temp_json = self.__json_interception(s)
+                temp_json = self._json_interception(s)
 
-            temp_json = self.__illegal_json_ends(temp_json)
+            temp_json = self._illegal_json_ends(temp_json)
             return temp_json
-        except Exception as e:
+        except Exception:
             raise ValueError("Failed to find a valid json in LLM response！" + temp_json)
 
-    def __json_interception(self, s, is_json_array: bool = False):
+    def _json_interception(self, s, is_json_array: bool = False):
         try:
             if is_json_array:
                 i = s.find("[")
@@ -150,17 +198,17 @@ class BaseOutputParser(MapOperator[ModelOutput, Any], ABC):
                         break
                 assert count == 0
                 return s[i : j + 1]
-        except Exception as e:
+        except Exception:
             return ""
 
-    def parse_prompt_response(self, model_out_text) -> T:
-        """
-        parse model out text to prompt define response
+    def parse_prompt_response(self, model_out_text) -> Any:
+        """Parse model out text to prompt define response.
+
         Args:
-            model_out_text:
+            model_out_text: The output of an LLM call.
 
         Returns:
-
+            Any: The parsed output of an LLM call.
         """
         cleaned_output = model_out_text.rstrip()
         if "```json" in cleaned_output:
@@ -176,7 +224,7 @@ class BaseOutputParser(MapOperator[ModelOutput, Any], ABC):
         cleaned_output = cleaned_output.strip()
         if not cleaned_output.startswith("{") or not cleaned_output.endswith("}"):
             logger.info("illegal json processing:\n" + cleaned_output)
-            cleaned_output = self.__extract_json(cleaned_output)
+            cleaned_output = self._extract_json(cleaned_output)
 
         if not cleaned_output or len(cleaned_output) <= 0:
             return model_out_text
@@ -186,20 +234,23 @@ class BaseOutputParser(MapOperator[ModelOutput, Any], ABC):
             .replace("\\n", " ")
             .replace("\n", " ")
             .replace("\\", " ")
-            .replace("\_", "_")
+            .replace("\\_", "_")
         )
-        cleaned_output = self.__illegal_json_ends(cleaned_output)
+        cleaned_output = self._illegal_json_ends(cleaned_output)
         return cleaned_output
 
     def parse_view_response(
         self, ai_text, data, parse_prompt_response: Any = None
     ) -> str:
-        """
-        parse the ai response info to user view
+        """Parse the AI response info to user view.
+
         Args:
-            text:
+            ai_text (str): The output of an LLM call.
+            data (dict): The data has been handled by some scene.
+            parse_prompt_response (Any): The prompt response has been parsed.
 
         Returns:
+            str: The parsed output of an LLM call.
 
         """
         return ai_text
@@ -207,20 +258,6 @@ class BaseOutputParser(MapOperator[ModelOutput, Any], ABC):
     def get_format_instructions(self) -> str:
         """Instructions on how the LLM output should be formatted."""
         raise NotImplementedError
-
-    # @property
-    # def _type(self) -> str:
-    #     """Return the type key."""
-    #     raise NotImplementedError(
-    #         f"_type property is not implemented in class {self.__class__.__name__}."
-    #         " This is required for serialization."
-    #     )
-
-    def dict(self, **kwargs: Any) -> Dict:
-        """Return dictionary representation of output parser."""
-        output_parser_dict = super().dict()
-        output_parser_dict["_type"] = self._type
-        return output_parser_dict
 
     async def map(self, input_value: ModelOutput) -> Any:
         """Parse the output of an LLM call.
@@ -251,3 +288,17 @@ def _parse_model_response(response: ResponseTye):
     else:
         raise ValueError(f"Unsupported response type {type(response)}")
     return resp_obj_ex
+
+
+class SQLOutputParser(BaseOutputParser):
+    """Parse the SQL output of an LLM call."""
+
+    def __init__(self, is_stream_out: bool = False, **kwargs):
+        """Create a new SQL output parser."""
+        super().__init__(is_stream_out=is_stream_out, **kwargs)
+
+    def parse_model_nostream_resp(self, response: ResponseTye, sep: str):
+        """Parse the output of an LLM call."""
+        model_out_text = super().parse_model_nostream_resp(response, sep)
+        clean_str = super().parse_prompt_response(model_out_text)
+        return json.loads(clean_str, strict=True)

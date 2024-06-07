@@ -1,26 +1,17 @@
 from datetime import datetime
 from typing import List
 
-from sqlalchemy import Column, String, DateTime, Integer, Text, func
+from sqlalchemy import Column, DateTime, Integer, String, Text, func
 
-from dbgpt.storage.metadata import BaseDao
-from dbgpt.storage.metadata.meta_data import (
-    Base,
-    engine,
-    session,
-    META_DATA_DATABASE,
-)
 from dbgpt._private.config import Config
+from dbgpt.serve.rag.api.schemas import DocumentChunkVO
+from dbgpt.storage.metadata import BaseDao, Model
 
 CFG = Config()
 
 
-class DocumentChunkEntity(Base):
+class DocumentChunkEntity(Model):
     __tablename__ = "document_chunk"
-    __table_args__ = {
-        "mysql_charset": "utf8mb4",
-        "mysql_collate": "utf8mb4_unicode_ci",
-    }
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer)
     doc_name = Column(String(100))
@@ -33,18 +24,26 @@ class DocumentChunkEntity(Base):
     def __repr__(self):
         return f"DocumentChunkEntity(id={self.id}, doc_name='{self.doc_name}', doc_type='{self.doc_type}', document_id='{self.document_id}', content='{self.content}', meta_info='{self.meta_info}', gmt_created='{self.gmt_created}', gmt_modified='{self.gmt_modified}')"
 
+    @classmethod
+    def to_to_document_chunk_vo(cls, entity_list: List["DocumentChunkEntity"]):
+        return [
+            DocumentChunkVO(
+                id=entity.id,
+                document_id=entity.document_id,
+                doc_name=entity.doc_name,
+                doc_type=entity.doc_type,
+                content=entity.content,
+                meta_info=entity.meta_info,
+                gmt_created=entity.gmt_created.strftime("%Y-%m-%d %H:%M:%S"),
+                gmt_modified=entity.gmt_modified.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            for entity in entity_list
+        ]
+
 
 class DocumentChunkDao(BaseDao):
-    def __init__(self):
-        super().__init__(
-            database=META_DATA_DATABASE,
-            orm_base=Base,
-            db_engine=engine,
-            session=session,
-        )
-
     def create_documents_chunks(self, documents: List):
-        session = self.get_session()
+        session = self.get_raw_session()
         docs = [
             DocumentChunkEntity(
                 doc_name=document.doc_name,
@@ -63,8 +62,8 @@ class DocumentChunkDao(BaseDao):
 
     def get_document_chunks(
         self, query: DocumentChunkEntity, page=1, page_size=20, document_ids=None
-    ):
-        session = self.get_session()
+    ) -> List[DocumentChunkVO]:
+        session = self.get_raw_session()
         document_chunks = session.query(DocumentChunkEntity)
         if query.id is not None:
             document_chunks = document_chunks.filter(DocumentChunkEntity.id == query.id)
@@ -99,10 +98,10 @@ class DocumentChunkDao(BaseDao):
         )
         result = document_chunks.all()
         session.close()
-        return result
+        return DocumentChunkEntity.to_to_document_chunk_vo(result)
 
     def get_document_chunks_count(self, query: DocumentChunkEntity):
-        session = self.get_session()
+        session = self.get_raw_session()
         document_chunks = session.query(func.count(DocumentChunkEntity.id))
         if query.id is not None:
             document_chunks = document_chunks.filter(DocumentChunkEntity.id == query.id)
@@ -126,8 +125,8 @@ class DocumentChunkDao(BaseDao):
         session.close()
         return count
 
-    def delete(self, document_id: int):
-        session = self.get_session()
+    def raw_delete(self, document_id: int):
+        session = self.get_raw_session()
         if document_id is None:
             raise Exception("document_id is None")
         query = DocumentChunkEntity(document_id=document_id)

@@ -1,10 +1,10 @@
 import json
-from typing import Dict, Iterator, List
 import logging
-from dbgpt.core import ModelOutput
-from dbgpt.model.parameter import ModelParameters
-from dbgpt.model.cluster.worker_base import ModelWorker
+from typing import Dict, Iterator, List
 
+from dbgpt.core import ModelMetadata, ModelOutput
+from dbgpt.model.cluster.worker_base import ModelWorker
+from dbgpt.model.parameter import ModelParameters
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,44 @@ class RemoteModelWorker(ModelWorker):
                 timeout=self.timeout,
             )
             return ModelOutput(**response.json())
+
+    def count_token(self, prompt: str) -> int:
+        raise NotImplementedError
+
+    async def async_count_token(self, prompt: str) -> int:
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            url = self.worker_addr + "/count_token"
+            logger.debug(f"Send async_count_token to url {url}, params: {prompt}")
+            response = await client.post(
+                url,
+                headers=self.headers,
+                json={"prompt": prompt},
+                timeout=self.timeout,
+            )
+            return response.json()
+
+    async def async_get_model_metadata(self, params: Dict) -> ModelMetadata:
+        """Asynchronously get model metadata"""
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            url = self.worker_addr + "/model_metadata"
+            logger.debug(
+                f"Send async_get_model_metadata to url {url}, params: {params}"
+            )
+            response = await client.post(
+                url,
+                headers=self.headers,
+                json=params,
+                timeout=self.timeout,
+            )
+            return ModelMetadata.from_dict(response.json())
+
+    def get_model_metadata(self, params: Dict) -> ModelMetadata:
+        """Get model metadata"""
+        raise NotImplementedError
 
     def embeddings(self, params: Dict) -> List[List[float]]:
         """Get embeddings for input"""

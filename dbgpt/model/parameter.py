@@ -4,12 +4,9 @@
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, Optional, Union, Tuple
+from typing import Dict, Optional, Tuple, Union
 
-from dbgpt.model.conversation import conv_templates
 from dbgpt.util.parameter_utils import BaseParameters
-
-suported_prompt_templates = ",".join(conv_templates.keys())
 
 
 class WorkerType(str, Enum):
@@ -116,6 +113,9 @@ class ModelAPIServerParameters(BaseParameters):
         default=None,
         metadata={"help": "Optional list of comma separated API keys"},
     )
+    embedding_batch_size: Optional[int] = field(
+        default=None, metadata={"help": "Embedding batch size"}
+    )
 
     log_level: Optional[str] = field(
         default=None,
@@ -163,6 +163,10 @@ class ModelWorkerParameters(BaseModelParameters):
     worker_type: Optional[str] = field(
         default=None,
         metadata={"valid_values": WorkerType.values(), "help": "Worker type"},
+    )
+    model_alias: Optional[str] = field(
+        default=None,
+        metadata={"help": "model alias"},
     )
     worker_class: Optional[str] = field(
         default=None,
@@ -251,6 +255,10 @@ class BaseEmbeddingModelParameters(BaseModelParameters):
     def build_kwargs(self, **kwargs) -> Dict:
         pass
 
+    def is_rerank_model(self) -> bool:
+        """Check if the model is a rerank model"""
+        return False
+
 
 @dataclass
 class EmbeddingModelParameters(BaseEmbeddingModelParameters):
@@ -268,6 +276,19 @@ class EmbeddingModelParameters(BaseEmbeddingModelParameters):
         },
     )
 
+    rerank: Optional[bool] = field(
+        default=False, metadata={"help": "Whether the model is a rerank model"}
+    )
+
+    max_length: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Max length for input sequences. Longer sequences will be "
+            "truncated. If None, max length of the model will be used, just for rerank"
+            " model now."
+        },
+    )
+
     def build_kwargs(self, **kwargs) -> Dict:
         model_kwargs, encode_kwargs = None, None
         if self.device:
@@ -276,9 +297,15 @@ class EmbeddingModelParameters(BaseEmbeddingModelParameters):
             encode_kwargs = {"normalize_embeddings": self.normalize_embeddings}
         if model_kwargs:
             kwargs["model_kwargs"] = model_kwargs
+        if self.is_rerank_model():
+            kwargs["max_length"] = self.max_length
         if encode_kwargs:
             kwargs["encode_kwargs"] = encode_kwargs
         return kwargs
+
+    def is_rerank_model(self) -> bool:
+        """Check if the model is a rerank model"""
+        return self.rerank
 
 
 @dataclass
@@ -299,7 +326,8 @@ class ModelParameters(BaseModelParameters):
     prompt_template: Optional[str] = field(
         default=None,
         metadata={
-            "help": f"Prompt template. If None, the prompt template is automatically determined from model path, supported template: {suported_prompt_templates}"
+            "help": f"Prompt template. If None, the prompt template is automatically "
+            f"determined from model path"
         },
     )
     max_context_size: Optional[int] = field(
@@ -450,7 +478,8 @@ class ProxyModelParameters(BaseModelParameters):
     proxyllm_backend: Optional[str] = field(
         default=None,
         metadata={
-            "help": "The model name actually pass to current proxy server url, such as gpt-3.5-turbo, gpt-4, chatglm_pro, chatglm_std and so on"
+            "help": "The model name actually pass to current proxy server url, such "
+            "as gpt-3.5-turbo, gpt-4, chatglm_pro, chatglm_std and so on"
         },
     )
     model_type: Optional[str] = field(
@@ -463,18 +492,31 @@ class ProxyModelParameters(BaseModelParameters):
     device: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Device to run model. If None, the device is automatically determined"
+            "help": "Device to run model. If None, the device is automatically "
+            "determined"
         },
     )
     prompt_template: Optional[str] = field(
         default=None,
         metadata={
-            "help": f"Prompt template. If None, the prompt template is automatically determined from model path, supported template: {suported_prompt_templates}"
+            "help": f"Prompt template. If None, the prompt template is automatically "
+            f"determined from model path"
         },
     )
     max_context_size: Optional[int] = field(
         default=4096, metadata={"help": "Maximum context size"}
     )
+    llm_client_class: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "The class name of llm client, such as "
+            "dbgpt.model.proxy.llms.proxy_model.ProxyModel"
+        },
+    )
+
+    def __post_init__(self):
+        if not self.proxy_server_url and self.proxy_api_base:
+            self.proxy_server_url = f"{self.proxy_api_base}/chat/completions"
 
 
 @dataclass
@@ -518,26 +560,35 @@ class ProxyEmbeddingParameters(BaseEmbeddingModelParameters):
         metadata={"help": "Tto support Azure OpenAI Service custom deployment names"},
     )
 
+    rerank: Optional[bool] = field(
+        default=False, metadata={"help": "Whether the model is a rerank model"}
+    )
+
     def build_kwargs(self, **kwargs) -> Dict:
         params = {
             "openai_api_base": self.proxy_server_url,
             "openai_api_key": self.proxy_api_key,
             "openai_api_type": self.proxy_api_type if self.proxy_api_type else None,
-            "openai_api_version": self.proxy_api_version
-            if self.proxy_api_version
-            else None,
+            "openai_api_version": (
+                self.proxy_api_version if self.proxy_api_version else None
+            ),
             "model": self.proxy_backend,
-            "deployment": self.proxy_deployment
-            if self.proxy_deployment
-            else self.proxy_backend,
+            "deployment": (
+                self.proxy_deployment if self.proxy_deployment else self.proxy_backend
+            ),
         }
         for k, v in kwargs:
             params[k] = v
         return params
 
+    def is_rerank_model(self) -> bool:
+        """Check if the model is a rerank model"""
+        return self.rerank
+
 
 _EMBEDDING_PARAMETER_CLASS_TO_NAME_CONFIG = {
-    ProxyEmbeddingParameters: "proxy_openai,proxy_azure"
+    ProxyEmbeddingParameters: "proxy_openai,proxy_azure,proxy_http_openapi,"
+    "proxy_ollama,rerank_proxy_http_openapi",
 }
 
 EMBEDDING_NAME_TO_PARAMETER_CLASS_CONFIG = {}

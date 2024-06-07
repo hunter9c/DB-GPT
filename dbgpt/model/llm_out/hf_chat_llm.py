@@ -1,6 +1,7 @@
 import logging
-import torch
 from threading import Thread
+
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,9 @@ def huggingface_chat_generate_stream(
     top_p = float(params.get("top_p", 1.0))
     echo = params.get("echo", False)
     max_new_tokens = int(params.get("max_new_tokens", 2048))
+    stop_token_ids = params.get("stop_token_ids", [])
+    do_sample = params.get("do_sample", None)
+    custom_stop_words = params.get("custom_stop_words", [])
 
     input_ids = tokenizer(prompt).input_ids
     # input_ids = input_ids.to(device)
@@ -38,16 +42,29 @@ def huggingface_chat_generate_stream(
     streamer = TextIteratorStreamer(
         tokenizer, skip_prompt=not echo, skip_special_tokens=True
     )
-    generate_kwargs = {
-        "input_ids": input_ids,
+
+    base_kwargs = {
         "max_length": context_len,
         "temperature": temperature,
         "streamer": streamer,
+        "top_p": top_p,
     }
 
+    if stop_token_ids:
+        base_kwargs["eos_token_id"] = stop_token_ids
+    if do_sample is not None:
+        base_kwargs["do_sample"] = do_sample
+
+    logger.info(f"Predict with parameters: {base_kwargs}")
+
+    generate_kwargs = {"input_ids": input_ids, **base_kwargs}
     thread = Thread(target=model.generate, kwargs=generate_kwargs)
     thread.start()
     out = ""
     for new_text in streamer:
         out += new_text
+        if custom_stop_words:
+            for stop_word in custom_stop_words:
+                if out.endswith(stop_word):
+                    out = out[: -len(stop_word)]
         yield out

@@ -3,47 +3,48 @@
 
 Adapted from https://github.com/lm-sys/FastChat/blob/main/fastchat/serve/openai_api_server.py
 """
-from typing import Optional, List, Dict, Any, Generator
 
-import logging
 import asyncio
-import shortuuid
 import json
-from fastapi import APIRouter, FastAPI
-from fastapi import Depends, HTTPException
+import logging
+from typing import Any, Dict, Generator, List, Optional
+
+import shortuuid
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security.http import HTTPAuthorizationCredentials, HTTPBearer
 
-from pydantic import BaseSettings
-
-from fastchat.protocol.openai_api_protocol import (
+from dbgpt._private.pydantic import BaseModel, model_to_dict, model_to_json
+from dbgpt.component import BaseComponent, ComponentType, SystemApp
+from dbgpt.core import ModelOutput
+from dbgpt.core.interface.message import ModelMessage
+from dbgpt.core.schema.api import (
+    APIChatCompletionRequest,
     ChatCompletionResponse,
+    ChatCompletionResponseChoice,
     ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
     ChatMessage,
-    ChatCompletionResponseChoice,
     DeltaMessage,
+    EmbeddingsRequest,
+    EmbeddingsResponse,
+    ErrorCode,
+    ErrorResponse,
     ModelCard,
     ModelList,
     ModelPermission,
+    RelevanceRequest,
+    RelevanceResponse,
     UsageInfo,
 )
-from fastchat.protocol.api_protocol import (
-    APIChatCompletionRequest,
-)
-from fastchat.serve.openai_api_server import create_error_response, check_requests
-from fastchat.constants import ErrorCode
-
-from dbgpt.component import BaseComponent, ComponentType, SystemApp
-from dbgpt.util.parameter_utils import EnvArgumentParser
-from dbgpt.core import ModelOutput
-from dbgpt.core.interface.message import ModelMessage
 from dbgpt.model.base import ModelInstance
-from dbgpt.model.parameter import ModelAPIServerParameters, WorkerType
-from dbgpt.model.cluster import ModelRegistry
 from dbgpt.model.cluster.manager_base import WorkerManager, WorkerManagerFactory
+from dbgpt.model.cluster.registry import ModelRegistry
+from dbgpt.model.parameter import ModelAPIServerParameters, WorkerType
+from dbgpt.util.fastapi import create_app
+from dbgpt.util.parameter_utils import EnvArgumentParser
 from dbgpt.util.utils import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -55,8 +56,9 @@ class APIServerException(Exception):
         self.message = message
 
 
-class APISettings(BaseSettings):
+class APISettings(BaseModel):
     api_keys: Optional[List[str]] = None
+    embedding_bach_size: int = 4
 
 
 api_settings = APISettings()
@@ -83,6 +85,68 @@ async def check_api_key(
     else:
         # api_keys not set; allow all
         return None
+
+
+def create_error_response(code: int, message: str) -> JSONResponse:
+    """Copy from fastchat.serve.openai_api_server.check_requests
+
+    We can't use fastchat.serve.openai_api_server because it has too many dependencies.
+    """
+    return JSONResponse(
+        model_to_dict(ErrorResponse(message=message, code=code)), status_code=400
+    )
+
+
+def check_requests(request) -> Optional[JSONResponse]:
+    """Copy from fastchat.serve.openai_api_server.create_error_response
+
+    We can't use fastchat.serve.openai_api_server because it has too many dependencies.
+    """
+    # Check all params
+    if request.max_tokens is not None and request.max_tokens <= 0:
+        return create_error_response(
+            ErrorCode.PARAM_OUT_OF_RANGE,
+            f"{request.max_tokens} is less than the minimum of 1 - 'max_tokens'",
+        )
+    if request.n is not None and request.n <= 0:
+        return create_error_response(
+            ErrorCode.PARAM_OUT_OF_RANGE,
+            f"{request.n} is less than the minimum of 1 - 'n'",
+        )
+    if request.temperature is not None and request.temperature < 0:
+        return create_error_response(
+            ErrorCode.PARAM_OUT_OF_RANGE,
+            f"{request.temperature} is less than the minimum of 0 - 'temperature'",
+        )
+    if request.temperature is not None and request.temperature > 2:
+        return create_error_response(
+            ErrorCode.PARAM_OUT_OF_RANGE,
+            f"{request.temperature} is greater than the maximum of 2 - 'temperature'",
+        )
+    if request.top_p is not None and request.top_p < 0:
+        return create_error_response(
+            ErrorCode.PARAM_OUT_OF_RANGE,
+            f"{request.top_p} is less than the minimum of 0 - 'top_p'",
+        )
+    if request.top_p is not None and request.top_p > 1:
+        return create_error_response(
+            ErrorCode.PARAM_OUT_OF_RANGE,
+            f"{request.top_p} is greater than the maximum of 1 - 'temperature'",
+        )
+    if request.top_k is not None and (request.top_k > -1 and request.top_k < 1):
+        return create_error_response(
+            ErrorCode.PARAM_OUT_OF_RANGE,
+            f"{request.top_k} is out of Range. Either set top_k to -1 or >=1.",
+        )
+    if request.stop is not None and (
+        not isinstance(request.stop, str) and not isinstance(request.stop, list)
+    ):
+        return create_error_response(
+            ErrorCode.PARAM_OUT_OF_RANGE,
+            f"{request.stop} is not valid under any of the given schemas - 'stop'",
+        )
+
+    return None
 
 
 class APIServer(BaseComponent):
@@ -125,27 +189,29 @@ class APIServer(BaseComponent):
         return controller
 
     async def get_model_instances_or_raise(
-        self, model_name: str
+        self, model_name: str, worker_type: str = "llm"
     ) -> List[ModelInstance]:
         """Get healthy model instances with request model name
 
         Args:
             model_name (str): Model name
+            worker_type (str, optional): Worker type. Defaults to "llm".
 
         Raises:
             APIServerException: If can't get healthy model instances with request model name
         """
         registry = self.get_model_registry()
-        registry_model_name = f"{model_name}@llm"
+        suffix = f"@{worker_type}"
+        registry_model_name = f"{model_name}{suffix}"
         model_instances = await registry.get_all_instances(
             registry_model_name, healthy_only=True
         )
         if not model_instances:
             all_instances = await registry.get_all_model_instances(healthy_only=True)
             models = [
-                ins.model_name.split("@llm")[0]
+                ins.model_name.split(suffix)[0]
                 for ins in all_instances
-                if ins.model_name.endswith("@llm")
+                if ins.model_name.endswith(suffix)
             ]
             if models:
                 models = "&&".join(models)
@@ -205,7 +271,8 @@ class APIServer(BaseComponent):
             chunk = ChatCompletionStreamResponse(
                 id=id, choices=[choice_data], model=model_name
             )
-            yield f"data: {chunk.json(exclude_unset=True, ensure_ascii=False)}\n\n"
+            json_data = model_to_json(chunk, exclude_unset=True, ensure_ascii=False)
+            yield f"data: {json_data}\n\n"
 
             previous_text = ""
             async for model_output in worker_manager.generate_stream(params):
@@ -236,10 +303,15 @@ class APIServer(BaseComponent):
                     if model_output.finish_reason is not None:
                         finish_stream_events.append(chunk)
                     continue
-                yield f"data: {chunk.json(exclude_unset=True, ensure_ascii=False)}\n\n"
+                json_data = model_to_json(chunk, exclude_unset=True, ensure_ascii=False)
+                yield f"data: {json_data}\n\n"
+
         # There is not "content" field in the last delta message, so exclude_none to exclude field "content".
         for finish_chunk in finish_stream_events:
-            yield f"data: {finish_chunk.json(exclude_none=True, ensure_ascii=False)}\n\n"
+            json_data = model_to_json(
+                finish_chunk, exclude_unset=True, ensure_ascii=False
+            )
+            yield f"data: {json_data}\n\n"
         yield "data: [DONE]\n\n"
 
     async def chat_completion_generate(
@@ -274,11 +346,52 @@ class APIServer(BaseComponent):
                 )
             )
             if model_output.usage:
-                task_usage = UsageInfo.parse_obj(model_output.usage)
-                for usage_key, usage_value in task_usage.dict().items():
+                task_usage = UsageInfo.model_validate(model_output.usage)
+                for usage_key, usage_value in model_to_dict(task_usage).items():
                     setattr(usage, usage_key, getattr(usage, usage_key) + usage_value)
 
         return ChatCompletionResponse(model=model_name, choices=choices, usage=usage)
+
+    async def embeddings_generate(
+        self, model: str, texts: List[str]
+    ) -> List[List[float]]:
+        """Generate embeddings
+
+        Args:
+            model (str): Model name
+            texts (List[str]): Texts to embed
+
+        Returns:
+            List[List[float]]: The embeddings of texts
+        """
+        worker_manager: WorkerManager = self.get_worker_manager()
+        params = {
+            "input": texts,
+            "model": model,
+        }
+        return await worker_manager.embeddings(params)
+
+    async def relevance_generate(
+        self, model: str, query: str, texts: List[str]
+    ) -> List[float]:
+        """Generate embeddings
+
+        Args:
+            model (str): Model name
+            query (str): Query text
+            texts (List[str]): Texts to embed
+
+        Returns:
+            List[List[float]]: The embeddings of texts
+        """
+        worker_manager: WorkerManager = self.get_worker_manager()
+        params = {
+            "input": texts,
+            "model": model,
+            "query": query,
+        }
+        scores = await worker_manager.embeddings(params)
+        return scores[0]
 
 
 def get_api_server() -> APIServer:
@@ -333,9 +446,65 @@ async def create_chat_completion(
     return await api_server.chat_completion_generate(request.model, params, request.n)
 
 
+@router.post("/v1/embeddings", dependencies=[Depends(check_api_key)])
+async def create_embeddings(
+    request: EmbeddingsRequest, api_server: APIServer = Depends(get_api_server)
+):
+    await api_server.get_model_instances_or_raise(request.model, worker_type="text2vec")
+    texts = request.input
+    if isinstance(texts, str):
+        texts = [texts]
+    batch_size = api_settings.embedding_bach_size
+    batches = [
+        texts[i : min(i + batch_size, len(texts))]
+        for i in range(0, len(texts), batch_size)
+    ]
+    data = []
+    async_tasks = []
+    for num_batch, batch in enumerate(batches):
+        async_tasks.append(api_server.embeddings_generate(request.model, batch))
+
+    # Request all embeddings in parallel
+    batch_embeddings: List[List[List[float]]] = await asyncio.gather(*async_tasks)
+    for num_batch, embeddings in enumerate(batch_embeddings):
+        data += [
+            {
+                "object": "embedding",
+                "embedding": emb,
+                "index": num_batch * batch_size + i,
+            }
+            for i, emb in enumerate(embeddings)
+        ]
+    return model_to_dict(
+        EmbeddingsResponse(data=data, model=request.model, usage=UsageInfo()),
+        exclude_none=True,
+    )
+
+
+@router.post(
+    "/v1/beta/relevance",
+    dependencies=[Depends(check_api_key)],
+    response_model=RelevanceResponse,
+)
+async def create_embeddings(
+    request: RelevanceRequest, api_server: APIServer = Depends(get_api_server)
+):
+    """Generate relevance scores for a query and a list of documents."""
+    await api_server.get_model_instances_or_raise(request.model, worker_type="text2vec")
+
+    scores = await api_server.relevance_generate(
+        request.model, request.query, request.documents
+    )
+    return model_to_dict(
+        RelevanceResponse(data=scores, model=request.model, usage=UsageInfo()),
+        exclude_none=True,
+    )
+
+
 def _initialize_all(controller_addr: str, system_app: SystemApp):
-    from dbgpt.model.cluster import RemoteWorkerManager, ModelRegistryClient
+    from dbgpt.model.cluster.controller.controller import ModelRegistryClient
     from dbgpt.model.cluster.worker.manager import _DefaultWorkerManagerFactory
+    from dbgpt.model.cluster.worker.remote_manager import RemoteWorkerManager
 
     if not system_app.get_component(
         ComponentType.MODEL_REGISTRY, ModelRegistry, default_component=None
@@ -370,20 +539,14 @@ def initialize_apiserver(
     host: str = None,
     port: int = None,
     api_keys: List[str] = None,
+    embedding_batch_size: Optional[int] = None,
 ):
     global global_system_app
     global api_settings
     embedded_mod = True
     if not app:
         embedded_mod = False
-        app = FastAPI()
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_credentials=True,
-            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-            allow_headers=["*"],
-        )
+        app = create_app()
 
     if not system_app:
         system_app = SystemApp(app)
@@ -391,6 +554,9 @@ def initialize_apiserver(
 
     if api_keys:
         api_settings.api_keys = api_keys
+
+    if embedding_batch_size:
+        api_settings.embedding_bach_size = embedding_batch_size
 
     app.include_router(router, prefix="/api", tags=["APIServer"])
 
@@ -407,7 +573,15 @@ def initialize_apiserver(
     if not embedded_mod:
         import uvicorn
 
-        uvicorn.run(app, host=host, port=port, log_level="info")
+        # https://github.com/encode/starlette/issues/617
+        cors_app = CORSMiddleware(
+            app=app,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["*"],
+        )
+        uvicorn.run(cors_app, host=host, port=port, log_level="info")
 
 
 def run_apiserver():
@@ -431,6 +605,7 @@ def run_apiserver():
         host=apiserver_params.host,
         port=apiserver_params.port,
         api_keys=api_keys,
+        embedding_batch_size=apiserver_params.embedding_batch_size,
     )
 
 

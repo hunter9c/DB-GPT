@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 
+import asyncio
 import logging
 import logging.handlers
-from typing import Any, List
-
 import os
-import sys
-import asyncio
+from typing import Any, List, Optional, cast
 
 from dbgpt.configs.model_config import LOGDIR
+
+try:
+    from termcolor import colored
+except ImportError:
+
+    def colored(x, *args, **kwargs):
+        return x
+
 
 server_error_msg = (
     "**NETWORK ERROR DUE TO HIGH TRAFFIC. PLEASE REGENERATE OR REFRESH THIS PAGE.**"
@@ -22,19 +28,25 @@ def _get_logging_level() -> str:
     return os.getenv("DBGPT_LOG_LEVEL", "INFO")
 
 
-def setup_logging_level(logging_level=None, logger_name: str = None):
+def setup_logging_level(
+    logging_level: Optional[str] = None, logger_name: Optional[str] = None
+):
     if not logging_level:
         logging_level = _get_logging_level()
     if type(logging_level) is str:
         logging_level = logging.getLevelName(logging_level.upper())
     if logger_name:
         logger = logging.getLogger(logger_name)
-        logger.setLevel(logging_level)
+        logger.setLevel(cast(str, logging_level))
     else:
         logging.basicConfig(level=logging_level, encoding="utf-8")
 
 
-def setup_logging(logger_name: str, logging_level=None, logger_filename: str = None):
+def setup_logging(
+    logger_name: str,
+    logging_level: Optional[str] = None,
+    logger_filename: Optional[str] = None,
+):
     if not logging_level:
         logging_level = _get_logging_level()
     logger = _build_logger(logger_name, logging_level, logger_filename)
@@ -68,7 +80,11 @@ def get_gpu_memory(max_gpus=None):
     return gpu_memory
 
 
-def _build_logger(logger_name, logging_level=None, logger_filename: str = None):
+def _build_logger(
+    logger_name,
+    logging_level: Optional[str] = None,
+    logger_filename: Optional[str] = None,
+):
     global handler
 
     formatter = logging.Formatter(
@@ -80,17 +96,6 @@ def _build_logger(logger_name, logging_level=None, logger_filename: str = None):
     if not logging.getLogger().handlers:
         setup_logging_level(logging_level=logging_level)
     logging.getLogger().handlers[0].setFormatter(formatter)
-
-    # Redirect stdout and stderr to loggers
-    # stdout_logger = logging.getLogger("stdout")
-    # stdout_logger.setLevel(logging.INFO)
-    # sl_1 = StreamToLogger(stdout_logger, logging.INFO)
-    # sys.stdout = sl_1
-    #
-    # stderr_logger = logging.getLogger("stderr")
-    # stderr_logger.setLevel(logging.ERROR)
-    # sl = StreamToLogger(stderr_logger, logging.ERROR)
-    # sys.stderr = sl
 
     # Add a file handler for all loggers
     if handler is None and logger_filename:
@@ -111,71 +116,19 @@ def _build_logger(logger_name, logging_level=None, logger_filename: str = None):
     return logger
 
 
-class StreamToLogger(object):
-    """
-    Fake file-like stream object that redirects writes to a logger instance.
-    """
-
-    def __init__(self, logger, log_level=logging.INFO):
-        self.terminal = sys.stdout
-        self.logger = logger
-        self.log_level = log_level
-        self.linebuf = ""
-
-    def __getattr__(self, attr):
-        return getattr(self.terminal, attr)
-
-    def write(self, buf):
-        temp_linebuf = self.linebuf + buf
-        self.linebuf = ""
-        for line in temp_linebuf.splitlines(True):
-            # From the io.TextIOWrapper docs:
-            #   On output, if newline is None, any '\n' characters written
-            #   are translated to the system default line separator.
-            # By default sys.stdout.write() expects '\n' newlines and then
-            # translates them so this is still cross platform.
-            if line[-1] == "\n":
-                encoded_message = line.encode("utf-8", "ignore").decode("utf-8")
-                self.logger.log(self.log_level, encoded_message.rstrip())
-            else:
-                self.linebuf += line
-
-    def flush(self):
-        if self.linebuf != "":
-            encoded_message = self.linebuf.encode("utf-8", "ignore").decode("utf-8")
-            self.logger.log(self.log_level, encoded_message.rstrip())
-        self.linebuf = ""
-
-
-def disable_torch_init():
-    """
-    Disable the redundant torch default initialization to accelerate model creation.
-    """
-    import torch
-
-    setattr(torch.nn.Linear, "reset_parameters", lambda self: None)
-    setattr(torch.nn.LayerNorm, "reset_parameters", lambda self: None)
-
-
-def pretty_print_semaphore(semaphore):
-    if semaphore is None:
-        return "None"
-    return f"Semaphore(value={semaphore._value}, locked={semaphore.locked()})"
-
-
 def get_or_create_event_loop() -> asyncio.BaseEventLoop:
     loop = None
     try:
         loop = asyncio.get_event_loop()
         assert loop is not None
-        return loop
+        return cast(asyncio.BaseEventLoop, loop)
     except RuntimeError as e:
         if not "no running event loop" in str(e) and not "no current event loop" in str(
             e
         ):
             raise e
         logging.warning("Cant not get running event loop, create new event loop now")
-    return asyncio.get_event_loop_policy().new_event_loop()
+    return cast(asyncio.BaseEventLoop, asyncio.get_event_loop_policy().new_event_loop())
 
 
 def logging_str_to_uvicorn_level(log_level_str):
@@ -209,7 +162,7 @@ class EndpointFilter(logging.Filter):
         return record.getMessage().find(self._path) == -1
 
 
-def setup_http_service_logging(exclude_paths: List[str] = None):
+def setup_http_service_logging(exclude_paths: Optional[List[str]] = None):
     """Setup http service logging
 
     Now just disable some logs

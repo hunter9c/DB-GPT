@@ -1,19 +1,21 @@
 from __future__ import annotations
 
-from typing import Dict, Callable, Optional, List
-from dataclasses import dataclass
-from abc import ABC, abstractmethod
-from enum import Enum
+import json
 import uuid
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
 
-from dbgpt.component import BaseComponent, SystemApp, ComponentType
+from dbgpt.component import BaseComponent, ComponentType, SystemApp
 
 
 class SpanType(str, Enum):
     BASE = "base"
     RUN = "run"
     CHAT = "chat"
+    AGENT = "agent"
 
 
 class SpanTypeRunName(str, Enum):
@@ -95,8 +97,23 @@ class Span:
             "end_time": None
             if not self.end_time
             else self.end_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-            "metadata": self.metadata,
+            "metadata": _clean_for_json(self.metadata),
         }
+
+    def copy(self) -> Span:
+        """Create a copy of this span."""
+        metadata = self.metadata.copy() if self.metadata else None
+        span = Span(
+            self.trace_id,
+            self.span_id,
+            self.span_type,
+            self.parent_span_id,
+            self.operation_name,
+            metadata=metadata,
+        )
+        span.start_time = self.start_time
+        span.end_time = self.end_time
+        return span
 
 
 class SpanStorageType(str, Enum):
@@ -187,3 +204,39 @@ class Tracer(BaseComponent, ABC):
 @dataclass
 class TracerContext:
     span_id: Optional[str] = None
+
+
+def _clean_for_json(data: Optional[str, Any] = None):
+    if data is None:
+        return None
+    if isinstance(data, dict):
+        cleaned_dict = {}
+        for key, value in data.items():
+            # Try to clean the sub-items
+            cleaned_value = _clean_for_json(value)
+            if cleaned_value is not None:
+                # Only add to the cleaned dict if it's not None
+                try:
+                    json.dumps({key: cleaned_value})
+                    cleaned_dict[key] = cleaned_value
+                except TypeError:
+                    # Skip this key-value pair if it can't be serialized
+                    pass
+        return cleaned_dict
+    elif isinstance(data, list):
+        cleaned_list = []
+        for item in data:
+            cleaned_item = _clean_for_json(item)
+            if cleaned_item is not None:
+                try:
+                    json.dumps(cleaned_item)
+                    cleaned_list.append(cleaned_item)
+                except TypeError:
+                    pass
+        return cleaned_list
+    else:
+        try:
+            json.dumps(data)
+            return data
+        except TypeError:
+            return None
